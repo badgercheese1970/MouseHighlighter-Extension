@@ -18,10 +18,14 @@
   };
   let cfg = { ...DEFAULTS };
 
-  chrome.storage.sync.get(DEFAULTS, saved => { cfg = { ...DEFAULTS, ...saved }; });
-  chrome.storage.onChanged.addListener(changes => {
-    for (const [k, { newValue }] of Object.entries(changes)) cfg[k] = newValue;
-  });
+  try {
+    chrome.storage.sync.get(DEFAULTS, saved => { cfg = { ...DEFAULTS, ...saved }; });
+    chrome.storage.onChanged.addListener(changes => {
+      for (const [k, { newValue }] of Object.entries(changes)) cfg[k] = newValue;
+    });
+  } catch (e) {
+    // Extension context invalidated (e.g. after reload) — use defaults, reload tab to restore
+  }
 
   // ── Canvas overlay ───────────────────────────────────────────────────────
   const canvas = document.createElement('canvas');

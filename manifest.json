@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Mouse Highlighter",
+  "version": "1.0",
+  "description": "Highlights your mouse on jiggle — visible in Google Meet, Zoom and Teams tab and window sharing.",
+  "permissions": ["storage"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Mouse Highlighter"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_end",
+      "all_frames": false
+    }
+  ]
+}

@@ -1,151 +1,116 @@
 /* Mouse Highlighter — content script
-   Runs inside every Chrome tab. The canvas is part of the page content,
-   so it appears in tab sharing and window sharing in Google Meet / Zoom / Teams. */
+   Uses a CSS div overlay (not canvas) so it appears in Chrome tab capture,
+   window sharing, and whole-screen sharing in Google Meet / Zoom / Teams. */
 
 (function () {
   'use strict';
 
-  // Prevent double-injection (e.g. on history navigation)
-  if (document.getElementById('__mh_canvas__')) return;
+  if (document.getElementById('__mh_highlight__')) return;
 
-  // ── Settings (synced from popup) ─────────────────────────────────────────
-  const DEFAULTS = {
-    circleSize: 120,
-    color: '#ffd700',
-    sensitivity: 50,
-    fadeDelay: 1500,
-    enabled: true
-  };
+  // ── Settings ──────────────────────────────────────────────────────────────
+  const DEFAULTS = { circleSize: 120, color: '#ffd700', sensitivity: 50, fadeDelay: 1500, enabled: true };
   let cfg = { ...DEFAULTS };
 
   try {
-    chrome.storage.sync.get(DEFAULTS, saved => { cfg = { ...DEFAULTS, ...saved }; });
+    chrome.storage.sync.get(DEFAULTS, saved => { cfg = { ...DEFAULTS, ...saved }; applyStyle(); });
     chrome.storage.onChanged.addListener(changes => {
       for (const [k, { newValue }] of Object.entries(changes)) cfg[k] = newValue;
+      applyStyle();
     });
-  } catch (e) {
-    // Extension context invalidated (e.g. after reload) — use defaults, reload tab to restore
-  }
+  } catch (e) { /* extension context invalidated — reload tab to restore */ }
 
-  // ── Canvas overlay ───────────────────────────────────────────────────────
-  const canvas = document.createElement('canvas');
-  canvas.id = '__mh_canvas__';
-  Object.assign(canvas.style, {
-    position:      'fixed',
-    top:           '0',
-    left:          '0',
-    width:         '100%',
-    height:        '100%',
-    pointerEvents: 'none',
-    zIndex:        '2147483647',
-    display:       'block'
+  // ── Highlight div ─────────────────────────────────────────────────────────
+  const el = document.createElement('div');
+  el.id = '__mh_highlight__';
+  Object.assign(el.style, {
+    position:        'fixed',
+    top:             '0',
+    left:            '0',
+    pointerEvents:   'none',
+    zIndex:          '2147483647',
+    borderRadius:    '50%',
+    opacity:         '0',
+    willChange:      'transform, opacity',
+    transform:       'translate(-9999px, -9999px)',
   });
-  (document.documentElement || document.body).appendChild(canvas);
-  const ctx = canvas.getContext('2d');
+  (document.documentElement || document.body).appendChild(el);
 
-  function resize() {
-    canvas.width  = window.innerWidth;
-    canvas.height = window.innerHeight;
+  function hexToRgb(hex) {
+    return {
+      r: parseInt(hex.slice(1,3), 16),
+      g: parseInt(hex.slice(3,5), 16),
+      b: parseInt(hex.slice(5,7), 16)
+    };
   }
-  resize();
-  window.addEventListener('resize', resize);
 
-  // ── State ────────────────────────────────────────────────────────────────
-  let mouseX = -999, mouseY = -999;
-  let positions = [];          // {x, y, t} — last 300 ms of movement
-  let currentAlpha = 0;
-  let targetAlpha  = 0;
-  let fadeTimer    = null;
+  function applyStyle() {
+    const { r, g, b } = hexToRgb(cfg.color);
+    const s = cfg.circleSize;
+    Object.assign(el.style, {
+      width:     s + 'px',
+      height:    s + 'px',
+      background: `rgba(${r},${g},${b},0.30)`,
+      border:    `3px solid rgba(${r},${g},${b},0.90)`,
+      boxShadow: `0 0 ${Math.round(s*0.15)}px ${Math.round(s*0.08)}px rgba(${r},${g},${b},0.35)`,
+    });
+  }
+  applyStyle();
 
-  // ── Mouse tracking ───────────────────────────────────────────────────────
+  // ── State ──────────────────────────────────────────────────────────────────
+  let mouseX = -9999, mouseY = -9999;
+  let positions = [];
+  let visible   = false;
+  let fadeTimer = null;
+
+  // ── Mouse tracking ─────────────────────────────────────────────────────────
   document.addEventListener('mousemove', e => {
     mouseX = e.clientX;
     mouseY = e.clientY;
+
+    // Move element immediately — no waiting for rAF
+    el.style.transform = `translate(${mouseX - cfg.circleSize/2}px, ${mouseY - cfg.circleSize/2}px)`;
+
     if (!cfg.enabled) return;
 
     const now = Date.now();
     positions.push({ x: mouseX, y: mouseY, t: now });
-    const cutoff = now - 300;
-    positions = positions.filter(p => p.t > cutoff);
+    positions = positions.filter(p => p.t > now - 300);
 
     if (detectJiggle()) showHighlight();
   }, true);
 
-  // ── Jiggle detection (same algorithm as the native Mac app) ──────────────
+  // ── Jiggle detection ───────────────────────────────────────────────────────
   function detectJiggle() {
     if (positions.length < 4) return false;
-    let totalMovement = 0, directionChanges = 0, lastDir = null;
-
+    let totalMovement = 0, dirChanges = 0, lastDir = null;
     for (let i = 1; i < positions.length; i++) {
-      const dx   = positions[i].x - positions[i - 1].x;
-      const dy   = positions[i].y - positions[i - 1].y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      totalMovement += dist;
-
-      if (dist > 2) {
-        const dir = { x: dx / dist, y: dy / dist };
-        if (lastDir) {
-          const dot = dir.x * lastDir.x + dir.y * lastDir.y;
-          if (dot < 0.3) directionChanges++;
-        }
+      const dx = positions[i].x - positions[i-1].x;
+      const dy = positions[i].y - positions[i-1].y;
+      const d  = Math.sqrt(dx*dx + dy*dy);
+      totalMovement += d;
+      if (d > 2) {
+        const dir = { x: dx/d, y: dy/d };
+        if (lastDir && (dir.x*lastDir.x + dir.y*lastDir.y) < 0.3) dirChanges++;
         lastDir = dir;
       }
     }
-
-    const threshold = 150 - cfg.sensitivity;
-    return directionChanges >= 2 && totalMovement > threshold;
+    return dirChanges >= 2 && totalMovement > (150 - cfg.sensitivity);
   }
 
-  // ── Show / hide ──────────────────────────────────────────────────────────
+  // ── Show / hide ────────────────────────────────────────────────────────────
   function showHighlight() {
-    targetAlpha = 1;
+    applyStyle(); // pick up any settings changes
+    el.style.transition = 'opacity 0.15s ease-in';
+    el.style.opacity    = '1';
+    visible = true;
     clearTimeout(fadeTimer);
-    fadeTimer = setTimeout(() => { targetAlpha = 0; }, cfg.fadeDelay);
+    fadeTimer = setTimeout(hideHighlight, cfg.fadeDelay);
   }
 
-  // ── Draw loop ────────────────────────────────────────────────────────────
-  function hexToRgb(hex) {
-    const r = parseInt(hex.slice(1, 3), 16);
-    const g = parseInt(hex.slice(3, 5), 16);
-    const b = parseInt(hex.slice(5, 7), 16);
-    return { r, g, b };
+  function hideHighlight() {
+    el.style.transition = 'opacity 0.4s ease-out';
+    el.style.opacity    = '0';
+    visible = false;
   }
 
-  function draw() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    // Smooth fade in (fast) / fade out (slower)
-    if (currentAlpha < targetAlpha) {
-      currentAlpha = Math.min(currentAlpha + 0.12, targetAlpha);
-    } else {
-      currentAlpha = Math.max(currentAlpha - 0.04, targetAlpha);
-    }
-
-    if (currentAlpha > 0.005 && mouseX > 0) {
-      const { r, g, b } = hexToRgb(cfg.color);
-      const radius = cfg.circleSize / 2;
-
-      ctx.save();
-      ctx.globalAlpha = currentAlpha;
-
-      // Filled circle (semi-transparent)
-      ctx.beginPath();
-      ctx.arc(mouseX, mouseY, radius, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.35)`;
-      ctx.fill();
-
-      // Visible ring
-      ctx.beginPath();
-      ctx.arc(mouseX, mouseY, radius, 0, Math.PI * 2);
-      ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.85)`;
-      ctx.lineWidth = 3;
-      ctx.stroke();
-
-      ctx.restore();
-    }
-
-    requestAnimationFrame(draw);
-  }
-
-  draw();
 })();
